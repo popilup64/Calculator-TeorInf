@@ -1,0 +1,392 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useI18n } from '../i18n/I18nContext';
+import type { SolutionState } from '../hooks/useSolution';
+import type { MatrixParseResult } from '../utils/matrix';
+import type { VectorParseResult } from '../utils/vector';
+import type { OperationDef } from '../operations';
+import type { Matrix, Vector } from '../types';
+import { MathText } from './MathText';
+
+type Props = {
+  operation: OperationDef;
+  matrix: Matrix;
+  parsed: MatrixParseResult;
+  vector: Vector | null;
+  parsedVector: VectorParseResult | null;
+  remote: SolutionState;
+};
+
+function formatNumber(n: number): string {
+  if (Number.isInteger(n)) return n.toString();
+  return Number(n.toFixed(6)).toString();
+}
+
+export function ResultView({
+  operation,
+  matrix,
+  parsed,
+  vector,
+  parsedVector,
+  remote,
+}: Props) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
+  const result = remote.result;
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    };
+  }, []);
+
+  const totalCells = matrix.reduce((s, r) => s + r.length, 0);
+  const isCompletelyEmpty = !parsed.ok && parsed.emptyCells.length === totalCells;
+
+  const matrixIsSquare =
+    parsed.ok &&
+    parsed.matrix.length > 0 &&
+    parsed.matrix.length === parsed.matrix[0]?.length;
+
+  const needsVector = operation.inputKind === 'augmented';
+  const vectorEmptyCompletely =
+    needsVector &&
+    parsedVector &&
+    !parsedVector.ok &&
+    parsedVector.emptyCells.length === (vector?.length ?? 0);
+
+  let statusNode: ReactNode = null;
+  let statusKind: 'info' | 'loading' | 'error' = 'info';
+
+  if (!parsed.ok) {
+    if (parsed.invalidCells.length > 0) {
+      statusKind = 'error';
+      statusNode = t('invalidCells', { count: parsed.invalidCells.length });
+    } else if (!isCompletelyEmpty) {
+      statusKind = 'info';
+      statusNode = t('fillRemaining', { count: parsed.emptyCells.length });
+    }
+  } else if (operation.requiresSquare && !matrixIsSquare) {
+    statusKind = 'error';
+    statusNode = t('requiresSquare');
+  } else if (needsVector && parsedVector && !parsedVector.ok) {
+    if (parsedVector.invalidCells.length > 0) {
+      statusKind = 'error';
+      statusNode = t('invalidVectorCells', {
+        count: parsedVector.invalidCells.length,
+      });
+    } else if (!vectorEmptyCompletely) {
+      statusKind = 'info';
+      statusNode = t('fillVectorRemaining', {
+        count: parsedVector.emptyCells.length,
+      });
+    }
+  } else if (remote.status === 'loading') {
+    statusKind = 'loading';
+    statusNode = t('resultLoading');
+  } else if (remote.status === 'error') {
+    statusKind = 'error';
+    if (operation.category === 'information' && remote.error.kind === 'server') {
+      statusNode =
+        remote.error.message ??
+        t('errorServer', { status: remote.error.status ?? '?' });
+    } else if (remote.error.kind === 'server') {
+      statusNode =
+        remote.error.message ??
+        t('errorServer', { status: remote.error.status ?? '?' });
+    } else if (remote.error.kind === 'network') {
+      statusNode = t('errorNetwork');
+    } else {
+      statusNode = t('errorCompute');
+    }
+  }
+
+  const hasResult = result !== null;
+  const isStale = hasResult && remote.status !== 'success';
+
+  async function copyValue() {
+    if (!result) return;
+    let text = '';
+    if (result.kind === 'scalar') {
+      text = formatNumber(result.value);
+    } else if (result.kind === 'vector') {
+      text = result.value
+        .map((v, i) => `x${i + 1} = ${formatNumber(v)}`)
+        .join('\n');
+    } else if (result.kind === 'matrix') {
+      text = result.value
+        .map(row => row.map(formatNumber).join('\t'))
+        .join('\n');
+    } else if (result.kind === 'eigen') {
+      text = result.value
+        .map(
+          (p, i) =>
+            `λ${i + 1} = ${formatNumber(p.eigenvalue)}\nv${i + 1} = (${p.eigenvector
+              .map(formatNumber)
+              .join(', ')})`,
+        )
+        .join('\n\n');
+    } else {
+      text = result.value.answer;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  }
+
+  if (!hasResult && !statusNode && isCompletelyEmpty) {
+    return null;
+  }
+
+  if (!hasResult) {
+    return (
+      <div className="card" aria-live="polite">
+        <div className={`placeholder placeholder--${statusKind}`}>
+          {statusKind === 'loading' && <Spinner />}
+          <span>{statusNode}</span>
+        </div>
+      </div>
+    );
+  }
+
+  const resultLabel = (() => {
+    switch (operation.resultKind) {
+      case 'scalar':
+        return t('determinantLabel');
+      case 'vector':
+        return t('solutionLabel');
+      case 'matrix':
+        return t('inverseLabel');
+      case 'eigen':
+        return t('eigenLabel');
+      case 'sections':
+        return t('answerLabel');
+    }
+  })();
+
+  return (
+    <div className="card" aria-live="polite">
+      <div className={`card__body ${isStale ? 'card__body--stale' : ''}`}>
+        <div className="card__head">
+          <div className="card__title">
+            <span className="card__label">{resultLabel}</span>
+            {parsed.ok && (
+              <span className="card__context">
+                {parsed.matrix.length} × {parsed.matrix[0]?.length ?? 0}
+              </span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            className="copy"
+            onClick={copyValue}
+            aria-label={copied ? t('copied') : t('copy')}
+          >
+            {copied ? <IconCheck /> : <IconCopy />}
+            <span>{copied ? t('copied') : t('copy')}</span>
+          </button>
+        </div>
+
+        {result.kind === 'scalar' && (
+          <div className="scalar">{formatNumber(result.value)}</div>
+        )}
+
+        {result.kind === 'vector' && (
+          <div className="solution">
+            {result.value.map((v, i) => (
+              <div key={i} className="solution__chip">
+                <span className="solution__var">
+                  x<sub>{i + 1}</sub>
+                </span>
+                <span className="solution__eq">=</span>
+                <span className="solution__val">{formatNumber(v)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {result.kind === 'matrix' && (
+          <div className="matrix-result">
+            <span
+              className="matrix-result__bracket matrix-result__bracket--left"
+              aria-hidden="true"
+            />
+            <div
+              className="matrix-result__grid"
+              style={{
+                gridTemplateColumns: `repeat(${result.value[0]?.length ?? 0}, minmax(0, 72px))`,
+              }}
+            >
+              {result.value.flatMap((row, r) =>
+                row.map((v, c) => (
+                  <div key={`${r}-${c}`} className="matrix-result__cell">
+                    {formatNumber(v)}
+                  </div>
+                )),
+              )}
+            </div>
+            <span
+              className="matrix-result__bracket matrix-result__bracket--right"
+              aria-hidden="true"
+            />
+          </div>
+        )}
+
+        {result.kind === 'eigen' && (
+          <div className="eigen">
+            {result.value.map((pair, i) => (
+              <div key={i} className="eigen__pair">
+                <div className="eigen__head">
+                  <span className="eigen__var">
+                    λ<sub>{i + 1}</sub>
+                  </span>
+                  <span className="eigen__eq">=</span>
+                  <span className="eigen__lambda">
+                    {formatNumber(pair.eigenvalue)}
+                  </span>
+                </div>
+
+                <div className="eigen__vec">
+                  <span className="eigen__vec-bracket" aria-hidden="true" />
+                  <div
+                    className="eigen__vec-grid"
+                    style={{ gridTemplateColumns: 'minmax(0, 88px)' }}
+                  >
+                    {pair.eigenvector.map((v, j) => (
+                      <span key={j} className="eigen__vec-cell">
+                        {formatNumber(v)}
+                      </span>
+                    ))}
+                  </div>
+                  <span className="eigen__vec-bracket" aria-hidden="true" />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {result.kind === 'sections' && <ShortAnswer text={result.value.answer} />}
+      </div>
+
+      {statusNode && (
+        <div className={`card__status card__status--${statusKind}`}>
+          {statusKind === 'loading' && <Spinner />}
+          <span>{statusNode}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShortAnswer({ text }: { text: string }) {
+  const parts = text.split(', ');
+  const allAssignments =
+    parts.length > 1 && parts.every(p => p.includes(' = '));
+
+  if (!allAssignments) {
+    return (
+      <div className="short-answer">
+        <MathText>{text}</MathText>
+      </div>
+    );
+  }
+
+  return (
+    <div className="short-answer short-answer--chips">
+      {parts.map((p, i) => {
+        const eq = p.indexOf(' = ');
+        const label = p.slice(0, eq);
+        const value = p.slice(eq + 3);
+        return (
+          <div key={i} className="short-answer__chip">
+            <span className="short-answer__label">
+              <MathText>{label}</MathText>
+            </span>
+            <span className="short-answer__eq">=</span>
+            <span className="short-answer__value">
+              <MathText>{value}</MathText>
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------- Мелкие иконки / спиннер ---------- */
+
+function Spinner() {
+  return (
+    <span className="spinner" aria-hidden="true">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+        <circle
+          cx="12"
+          cy="12"
+          r="9"
+          stroke="currentColor"
+          strokeOpacity="0.25"
+          strokeWidth="3"
+        />
+        <path
+          d="M21 12a9 9 0 0 0-9-9"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="round"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function IconCopy() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <rect
+        x="9"
+        y="9"
+        width="11"
+        height="11"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="1.8"
+      />
+      <path
+        d="M5 15V6a2 2 0 0 1 2-2h9"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function IconCheck() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="m5 12 5 5 9-11"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
